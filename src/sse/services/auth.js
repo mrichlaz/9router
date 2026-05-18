@@ -198,6 +198,29 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+
+  const lowerError = errorText
+    ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
+    : "";
+
+  // Gemini request-shape errors are deterministic for all API keys/accounts.
+  // Retrying every account only adds latency and locks all credentials for the same bad payload.
+  if (
+    provider === "gemini" &&
+    (
+      (status === 400 && (
+        lowerError.includes("invalid_argument") ||
+        lowerError.includes("invalid argument") ||
+        lowerError.includes("invalid json payload") ||
+        lowerError.includes("request contains an invalid argument")
+      )) ||
+      (status === 500 && lowerError.includes("internal error encountered"))
+    )
+  ) {
+    log.warn("AUTH", `${provider}/${model || "unknown"} deterministic upstream error [${status}], not retrying other accounts`);
+    return { shouldFallback: false, cooldownMs: 0 };
+  }
+
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
