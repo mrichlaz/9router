@@ -35,6 +35,59 @@ function sanitizeGeminiFunctionName(name) {
   return sanitized.substring(0, 64);
 }
 
+function normalizeToolResponseContent(content) {
+  if (typeof content === "string") {
+    const parsed = tryParseJSON(content);
+    if (parsed === null) return { result: content };
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { result: parsed };
+    }
+    return parsed;
+  }
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map(item => {
+        if (typeof item === "string") return item;
+        if (item?.type === "text") return item.text || "";
+        return JSON.stringify(item);
+      })
+      .join("\n");
+    return { result: text };
+  }
+
+  if (typeof content === "object" && content !== null) {
+    return content;
+  }
+
+  return { result: content };
+}
+
+function addToolResponses(result, assistantMsg, followingToolMessages, tcID2Name) {
+  if (!assistantMsg.tool_calls || !Array.isArray(assistantMsg.tool_calls)) return;
+
+  const toolParts = [];
+  for (const tc of assistantMsg.tool_calls) {
+    if (tc.type !== "function" || !tc.id) continue;
+
+    const toolMsg = followingToolMessages.find(msg => msg.tool_call_id === tc.id);
+    if (!toolMsg) continue;
+
+    const name = tcID2Name[tc.id] || tc.function?.name || tc.id;
+    toolParts.push({
+      functionResponse: {
+        id: tc.id,
+        name: sanitizeGeminiFunctionName(name),
+        response: normalizeToolResponseContent(toolMsg.content)
+      }
+    });
+  }
+
+  if (toolParts.length > 0) {
+    result.contents.push({ role: "user", parts: toolParts });
+  }
+}
+
 // Core: Convert OpenAI request to Gemini format (base for all variants)
 function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE) {
   const result = {
@@ -68,16 +121,6 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
             tcID2Name[tc.id] = tc.function.name;
           }
         }
-      }
-    }
-  }
-
-  // Build tool responses cache
-  const toolResponses = {};
-  if (body.messages && Array.isArray(body.messages)) {
-    for (const msg of body.messages) {
-      if (msg.role === "tool" && msg.tool_call_id) {
-        toolResponses[msg.tool_call_id] = msg.content;
       }
     }
   }
@@ -122,7 +165,6 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
         }
 
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-          const toolCallIds = [];
           for (const tc of msg.tool_calls) {
             if (tc.type !== "function") continue;
 
@@ -135,51 +177,23 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
                 args: args
               }
             });
-            toolCallIds.push(tc.id);
           }
 
           if (parts.length > 0) {
             result.contents.push({ role: "model", parts });
           }
 
-          // Check if there are actual tool responses in the next messages
-          const hasActualResponses = toolCallIds.some(fid => toolResponses[fid]);
-
-          if (hasActualResponses) {
-            const toolParts = [];
-            for (const fid of toolCallIds) {
-              if (!toolResponses[fid]) continue;
-
-              let name = tcID2Name[fid];
-              if (!name) {
-                const idParts = fid.split("-");
-                if (idParts.length > 2) {
-                  name = idParts.slice(0, -2).join("-");
-                } else {
-                  name = fid;
-                }
-              }
-
-              let resp = toolResponses[fid];
-              let parsedResp = tryParseJSON(resp);
-              if (parsedResp === null) {
-                parsedResp = { result: resp };
-              } else if (typeof parsedResp !== "object") {
-                parsedResp = { result: parsedResp };
-              }
-
-              toolParts.push({
-                functionResponse: {
-                  id: fid,
-                  name: sanitizeGeminiFunctionName(name),
-                  response: { result: parsedResp }
-                }
-              });
+          const followingToolMessages = [];
+          for (let j = i + 1; j < body.messages.length; j++) {
+            const nextMsg = body.messages[j];
+            if (nextMsg.role === "tool") {
+              followingToolMessages.push(nextMsg);
+              continue;
             }
-            if (toolParts.length > 0) {
-              result.contents.push({ role: "user", parts: toolParts });
-            }
+            break;
           }
+
+          addToolResponses(result, msg, followingToolMessages, tcID2Name);
         } else if (parts.length > 0) {
           result.contents.push({ role: "model", parts });
         }
@@ -229,19 +243,31 @@ export function openaiToGeminiRequest(model, body, stream) {
 export function openaiToGeminiCLIRequest(model, body, stream) {
   const gemini = openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE);
   const isClaude = model.toLowerCase().includes("claude");
+  const lowerModel = model.toLowerCase();
+  const isGemma = lowerModel.startsWith("gemma-");
+  const isGemini3 = lowerModel.startsWith("gemini-3");
+  const isGemini = lowerModel.startsWith("gemini-");
 
   // Add thinking config for CLI
-  if (body.reasoning_effort) {
-    const budgetMap = { low: 1024, medium: 8192, high: 32768 };
-    const budget = budgetMap[body.reasoning_effort] || 8192;
-    gemini.generationConfig.thinkingConfig = {
-      thinkingBudget: budget,
-      include_thoughts: true
-    };
+  if (body.reasoning_effort && !isGemma) {
+    if (isGemini3) {
+      const levelMap = { none: "minimal", minimal: "minimal", low: "minimal", medium: "medium", high: "high", xhigh: "high" };
+      gemini.generationConfig.thinkingConfig = {
+        thinkingLevel: levelMap[body.reasoning_effort] || body.reasoning_effort,
+        include_thoughts: true
+      };
+    } else if (isGemini) {
+      const budgetMap = { none: 0, low: 1024, medium: 8192, high: 32768 };
+      const budget = budgetMap[body.reasoning_effort] || 8192;
+      gemini.generationConfig.thinkingConfig = {
+        thinkingBudget: budget,
+        include_thoughts: true
+      };
+    }
   }
 
   // Thinking config from Claude format
-  if (body.thinking?.type === "enabled" && body.thinking.budget_tokens) {
+  if (body.thinking?.type === "enabled" && body.thinking.budget_tokens && !isGemma) {
     gemini.generationConfig.thinkingConfig = {
       thinkingBudget: body.thinking.budget_tokens,
       include_thoughts: true

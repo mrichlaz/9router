@@ -160,6 +160,32 @@ function convertConstToEnum(obj) {
   }
 }
 
+// Collapse anyOf/oneOf pure const unions into enum before flattening.
+function collapseConstUnionsToEnum(obj) {
+  if (!obj || typeof obj !== "object") return;
+
+  for (const key of ["anyOf", "oneOf"]) {
+    const variants = obj[key];
+    if (!Array.isArray(variants) || variants.length === 0) continue;
+
+    const enumValues = variants
+      .map(item => (item && typeof item === "object" && Object.prototype.hasOwnProperty.call(item, "const") ? item.const : undefined))
+      .filter(value => value !== undefined);
+
+    if (enumValues.length === variants.length) {
+      obj.enum = [...new Set(enumValues.map(value => String(value)))];
+      obj.type = "string";
+      delete obj[key];
+    }
+  }
+
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object") {
+      collapseConstUnionsToEnum(value);
+    }
+  }
+}
+
 // Convert enum values to strings (Gemini requires string enum values + explicit type:"string")
 function convertEnumValuesToStrings(obj) {
   if (!obj || typeof obj !== "object") return;
@@ -303,6 +329,7 @@ export function cleanJSONSchemaForAntigravity(schema) {
 
   // Phase 1: Convert and prepare
   convertConstToEnum(cleaned);
+  collapseConstUnionsToEnum(cleaned);
   convertEnumValuesToStrings(cleaned);
 
   // Phase 2: Flatten complex structures

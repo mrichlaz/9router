@@ -1,6 +1,17 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 
+const FINISH_REASON_MAP = {
+  STOP: "stop",
+  MAX_TOKENS: "length",
+  SAFETY: "content_filter",
+  RECITATION: "content_filter"
+};
+
+function getStableToolCallId(part, state, toolCallIndex) {
+  return part.functionCall?.id || `call_${state.messageId}_${toolCallIndex}`;
+}
+
 // Convert Gemini response chunk to OpenAI format
 export function geminiToOpenAIResponse(chunk, state) {
   if (!chunk) return null;
@@ -37,12 +48,12 @@ export function geminiToOpenAIResponse(chunk, state) {
       const hasThoughtSig = part.thoughtSignature || part.thought_signature;
       const isThought = part.thought === true;
       
-      // Handle thought signature (thinking mode)
+      // Hide Gemini thought text by default. Keep only visible output + tool calls.
       if (hasThoughtSig) {
         const hasTextContent = part.text !== undefined && part.text !== "";
         const hasFunctionCall = !!part.functionCall;
         
-        if (hasTextContent) {
+        if (hasTextContent && !isThought) {
           results.push({
             id: `chatcmpl-${state.messageId}`,
             object: "chat.completion.chunk",
@@ -50,9 +61,7 @@ export function geminiToOpenAIResponse(chunk, state) {
             model: state.model,
             choices: [{
               index: 0,
-              delta: isThought 
-                ? { reasoning_content: part.text }
-                : { content: part.text },
+              delta: { content: part.text },
               finish_reason: null
             }]
           });
@@ -66,7 +75,7 @@ export function geminiToOpenAIResponse(chunk, state) {
           const toolCallIndex = state.functionIndex++;
           
           const toolCall = {
-            id: `${fcName}-${Date.now()}-${toolCallIndex}`,
+            id: getStableToolCallId(part, state, toolCallIndex),
             index: toolCallIndex,
             type: "function",
             function: {
@@ -93,6 +102,10 @@ export function geminiToOpenAIResponse(chunk, state) {
       }
 
       // Text content (non-thinking)
+      if (isThought) {
+        continue;
+      }
+
       if (part.text !== undefined && part.text !== "") {
         results.push({
           id: `chatcmpl-${state.messageId}`,
@@ -116,7 +129,7 @@ export function geminiToOpenAIResponse(chunk, state) {
         const toolCallIndex = state.functionIndex++;
         
         const toolCall = {
-          id: `${fcName}-${Date.now()}-${toolCallIndex}`,
+          id: getStableToolCallId(part, state, toolCallIndex),
           index: toolCallIndex,
           type: "function",
           function: {
@@ -208,7 +221,7 @@ export function geminiToOpenAIResponse(chunk, state) {
 
   // Finish reason - include usage in final chunk
   if (candidate.finishReason) {
-    let finishReason = candidate.finishReason.toLowerCase();
+    let finishReason = FINISH_REASON_MAP[candidate.finishReason] || candidate.finishReason.toLowerCase();
     if (finishReason === "stop" && state.toolCalls.size > 0) {
       finishReason = "tool_calls";
     }

@@ -23,16 +23,16 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     const candidate = response.candidates[0];
     const content = candidate.content;
     const usage = response.usageMetadata || responseBody.usageMetadata;
-    let textContent = "", reasoningContent = "";
+    let textContent = "";
     const toolCalls = [];
 
     if (content?.parts) {
       for (const part of content.parts) {
-        if (part.thought === true && part.text) reasoningContent += part.text;
-        else if (part.text !== undefined) textContent += part.text;
+        if (part.thought === true) continue;
+        if (part.text !== undefined) textContent += part.text;
         if (part.functionCall) {
           toolCalls.push({
-            id: `call_${part.functionCall.name}_${Date.now()}_${toolCalls.length}`,
+            id: part.functionCall.id || `call_${response.responseId || Date.now()}_${toolCalls.length}`,
             type: "function",
             function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args || {}) }
           });
@@ -42,11 +42,16 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 
     const message = { role: "assistant" };
     if (textContent) message.content = textContent;
-    if (reasoningContent) message.reasoning_content = reasoningContent;
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
     if (!message.content && !message.tool_calls) message.content = "";
 
-    let finishReason = (candidate.finishReason || "stop").toLowerCase();
+    const finishReasonMap = {
+      STOP: "stop",
+      MAX_TOKENS: "length",
+      SAFETY: "content_filter",
+      RECITATION: "content_filter"
+    };
+    let finishReason = finishReasonMap[candidate.finishReason] || (candidate.finishReason || "stop").toLowerCase();
     if (finishReason === "stop" && toolCalls.length > 0) finishReason = "tool_calls";
 
     const result = {
@@ -59,8 +64,8 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 
     if (usage) {
       result.usage = {
-        prompt_tokens: (usage.promptTokenCount || 0) + (usage.thoughtsTokenCount || 0),
-        completion_tokens: usage.candidatesTokenCount || 0,
+        prompt_tokens: usage.promptTokenCount || 0,
+        completion_tokens: (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0),
         total_tokens: usage.totalTokenCount || 0
       };
       if (usage.thoughtsTokenCount > 0) {
