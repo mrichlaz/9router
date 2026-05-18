@@ -4,6 +4,7 @@ import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats } from "./requestDetail.js";
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
+import { stripThinkTagsFromText, createStreamingThinkTagFilter } from "../../utils/thinkTags.js";
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -36,6 +37,7 @@ function pickAssistantMessageForChatCompletion(output) {
  */
 export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   const chunks = [];
+  const thinkFilter = createStreamingThinkTagFilter();
 
   for (const line of String(rawSSE || "").split("\n")) {
     const trimmed = line.trim();
@@ -57,7 +59,10 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
   for (const chunk of chunks) {
     const choice = chunk?.choices?.[0];
     const delta = choice?.delta || {};
-    if (typeof delta.content === "string" && delta.content.length > 0) contentParts.push(delta.content);
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      const visible = thinkFilter(delta.content);
+      if (visible && visible.length > 0) contentParts.push(visible);
+    }
     if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) reasoningParts.push(delta.reasoning_content);
     if (choice?.finish_reason) finishReason = choice.finish_reason;
     if (chunk?.usage && typeof chunk.usage === "object") usage = chunk.usage;
@@ -77,7 +82,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
     }
   }
 
-  const message = { role: "assistant", content: contentParts.join("") || (toolCallMap.size > 0 ? null : "") };
+  const message = { role: "assistant", content: stripThinkTagsFromText(contentParts.join("")) || (toolCallMap.size > 0 ? null : "") };
   if (reasoningParts.length > 0) message.reasoning_content = reasoningParts.join("");
   if (toolCallMap.size > 0) {
     message.tool_calls = [...toolCallMap.entries()].sort((a, b) => a[0] - b[0]).map(([, tc]) => tc);

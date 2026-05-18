@@ -8,6 +8,7 @@ import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
+import { stripThinkTagsFromText } from "../../utils/thinkTags.js";
 
 /**
  * Translate non-streaming response body from provider format → OpenAI format.
@@ -95,7 +96,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     }
 
     const message = { role: "assistant" };
-    if (textContent) message.content = textContent;
+    if (textContent) message.content = stripThinkTagsFromText(textContent);
     if (thinkingContent) message.reasoning_content = thinkingContent;
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
     if (!message.content && !message.tool_calls) message.content = "";
