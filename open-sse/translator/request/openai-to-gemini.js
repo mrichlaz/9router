@@ -141,7 +141,7 @@ function addToolResponses(result, assistantMsg, followingToolMessages, tcID2Name
     const name = tcID2Name[tc.id] || tc.function?.name || tc.id;
     toolParts.push({
       functionResponse: {
-        id: tc.id,
+        id: tc.id?.startsWith?.("call_") ? null : tc.id,
         name: sanitizeGeminiFunctionName(name),
         response: normalizeToolResponseContent(toolMsg.content)
       }
@@ -149,12 +149,12 @@ function addToolResponses(result, assistantMsg, followingToolMessages, tcID2Name
   }
 
   if (toolParts.length > 0) {
-    result.contents.push({ role: "user", parts: toolParts });
+    result.contents.push({ role: "function", parts: toolParts });
   }
 }
 
 // Core: Convert OpenAI request to Gemini format (base for all variants)
-function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE) {
+function openaiToGeminiBase(model, body, stream, signature = null) {
   const result = {
     model: model,
     contents: [],
@@ -210,8 +210,10 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       } else if (role === "assistant") {
         const parts = [];
 
-        // Thinking/reasoning → thought part with signature
-        if (msg.reasoning_content) {
+        // Thinking/reasoning → thought part with signature only for Gemini-compatible
+        // surfaces that require signature echoing. Native Gemini/Gemma rejects many
+        // synthetic thought signatures, so strict mode omits them.
+        if (msg.reasoning_content && signature) {
           parts.push({
             thought: true,
             text: msg.reasoning_content
@@ -235,9 +237,9 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
 
             const args = tryParseJSON(tc.function?.arguments || "{}");
             parts.push({
-              thoughtSignature: signature,
+              ...(signature && { thoughtSignature: signature }),
               functionCall: {
-                id: tc.id,
+                id: tc.id?.startsWith?.("call_") ? null : tc.id,
                 name: sanitizeGeminiFunctionName(tc.function.name),
                 args: args
               }
