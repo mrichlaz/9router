@@ -1,6 +1,13 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 
+// Some OpenAI-compatible clients (Pi, OpenClaw, etc) display assistant `content`
+// verbatim, so wrapping reasoning text with `<think>`/`</think>` markers leaks them
+// into the visible reply. Reasoning is already exposed via `reasoning_content`,
+// so suppress the wrapper by default. Set EMIT_THINK_TAGS=1 to restore the legacy
+// Claude-Code-friendly behaviour.
+const EMIT_THINK_TAGS = process.env.EMIT_THINK_TAGS === "1";
+
 // Create OpenAI chunk helper
 function createChunk(state, delta, finishReason = null) {
   return {
@@ -44,7 +51,9 @@ export function claudeToOpenAIResponse(chunk, state) {
       } else if (block?.type === "thinking") {
         state.inThinkingBlock = true;
         state.currentBlockIndex = chunk.index;
-        results.push(createChunk(state, { content: "<think>" }));
+        if (EMIT_THINK_TAGS) {
+          results.push(createChunk(state, { content: "<think>" }));
+        }
       } else if (block?.type === "tool_use") {
         const toolCallIndex = state.toolCallIndex++;
         // Restore original tool name from mapping (Claude OAuth)
@@ -95,7 +104,9 @@ export function claudeToOpenAIResponse(chunk, state) {
         break;
       }
       if (state.inThinkingBlock && chunk.index === state.currentBlockIndex) {
-        results.push(createChunk(state, { content: "</think>" }));
+        if (EMIT_THINK_TAGS) {
+          results.push(createChunk(state, { content: "</think>" }));
+        }
         state.inThinkingBlock = false;
       }
       state.textBlockStarted = false;
