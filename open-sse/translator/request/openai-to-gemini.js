@@ -63,6 +63,71 @@ function normalizeToolResponseContent(content) {
   return { result: content };
 }
 
+function pruneGeminiPayload(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+
+  if (Array.isArray(obj)) {
+    for (let i = obj.length - 1; i >= 0; i -= 1) {
+      pruneGeminiPayload(obj[i]);
+      if (obj[i] === undefined || obj[i] === null) obj.splice(i, 1);
+    }
+    return obj;
+  }
+
+  for (const key of Object.keys(obj)) {
+    const value = obj[key];
+    if (value === undefined || value === null) {
+      delete obj[key];
+      continue;
+    }
+    if (typeof value === "object") {
+      pruneGeminiPayload(value);
+      if (Array.isArray(value) && value.length === 0) {
+        delete obj[key];
+      } else if (!Array.isArray(value) && Object.keys(value).length === 0) {
+        delete obj[key];
+      }
+    }
+  }
+
+  return obj;
+}
+
+function hasVisiblePart(part) {
+  return Boolean(part?.text || part?.inlineData || part?.fileData || part?.functionCall || part?.functionResponse);
+}
+
+function pruneEmptyContents(result) {
+  if (!Array.isArray(result.contents)) return;
+  result.contents = result.contents
+    .map(content => ({
+      ...content,
+      parts: Array.isArray(content.parts) ? content.parts.filter(hasVisiblePart) : content.parts
+    }))
+    .filter(content => Array.isArray(content.parts) && content.parts.length > 0);
+}
+
+function applyStrictGeminiMode(result, model, body) {
+  const lowerModel = model.toLowerCase();
+  const isGemma = lowerModel.startsWith("gemma-");
+
+  pruneEmptyContents(result);
+
+  if (isGemma) {
+    delete result.generationConfig?.thinkingConfig;
+    delete result.generationConfig?.responseSchema;
+    delete result.generationConfig?.responseMimeType;
+    delete result.toolConfig;
+  }
+
+  if (body?.extra_body?.google?.safety_settings === undefined && body?.safety_settings !== true) {
+    delete result.safetySettings;
+  }
+
+  pruneGeminiPayload(result);
+  return result;
+}
+
 function addToolResponses(result, assistantMsg, followingToolMessages, tcID2Name) {
   if (!assistantMsg.tool_calls || !Array.isArray(assistantMsg.tool_calls)) return;
 
@@ -231,7 +296,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     }
   }
 
-  return result;
+  return applyStrictGeminiMode(result, model, body);
 }
 
 // OpenAI -> Gemini (standard API)
@@ -290,7 +355,7 @@ export function openaiToGeminiCLIRequest(model, body, stream) {
     }
   }
 
-  return gemini;
+  return applyStrictGeminiMode(gemini, model, body);
 }
 
 // Wrap Gemini CLI format in Cloud Code wrapper

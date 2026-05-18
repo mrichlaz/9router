@@ -193,9 +193,7 @@ function convertEnumValuesToStrings(obj) {
   if (obj.enum && Array.isArray(obj.enum)) {
     obj.enum = obj.enum.map(v => String(v));
     // Gemini API requires type:"string" when enum is present — without it returns 400
-    if (!obj.type) {
-      obj.type = "string";
-    }
+    obj.type = "string";
   }
 
   for (const value of Object.values(obj)) {

@@ -78,6 +78,11 @@ export async function parseUpstreamError(response, executor = null) {
   try {
     const json = JSON.parse(bodyText);
     message = json.error?.message || json.message || json.error || bodyText;
+    const details = json.error?.details || json.details;
+    if (Array.isArray(details) && details.length > 0) {
+      const detailText = JSON.stringify(details);
+      message = `${typeof message === "string" ? message : JSON.stringify(message)} | details: ${detailText}`;
+    }
   } catch {
     message = bodyText;
   }
