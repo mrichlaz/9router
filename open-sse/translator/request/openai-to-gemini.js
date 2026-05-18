@@ -3,6 +3,7 @@ import { FORMATS } from "../formats.js";
 import { DEFAULT_THINKING_AG_SIGNATURE, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE } from "../../config/defaultThinkingSignature.js";
 import { ANTIGRAVITY_DEFAULT_SYSTEM } from "../../config/appConstants.js";
 import { openaiToClaudeRequestForAntigravity } from "./openai-to-claude.js";
+import { workerStyleOpenAIToGemini } from "./worker-style-gemini.js";
 
 function generateUUID() {
   return crypto.randomUUID();
@@ -303,7 +304,10 @@ function openaiToGeminiBase(model, body, stream, signature = null) {
 
 // OpenAI -> Gemini (standard API)
 export function openaiToGeminiRequest(model, body, stream) {
-  return openaiToGeminiBase(model, body, stream);
+  if (process.env.GEMINI_LEGACY_TRANSLATOR === "1") {
+    return openaiToGeminiBase(model, body, stream);
+  }
+  return workerStyleOpenAIToGemini(model, body);
 }
 
 // OpenAI -> Gemini CLI (Cloud Code Assist)

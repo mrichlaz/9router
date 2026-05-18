@@ -232,6 +232,39 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
+
+    // Diagnostic: dump outbound payload on deterministic Gemini errors so we can fix the exact field.
+    try {
+      const lowered = (typeof message === "string" ? message : JSON.stringify(message || "")).toLowerCase();
+      const isGeminiPayloadIssue =
+        provider === "gemini" &&
+        ((statusCode === 400 && (lowered.includes("invalid_argument") || lowered.includes("invalid argument") || lowered.includes("invalid json payload") || lowered.includes("request contains an invalid argument"))) ||
+         (statusCode === 500 && lowered.includes("internal error encountered")));
+      if (isGeminiPayloadIssue) {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        const dir = path.resolve(process.cwd(), "logs", "gemini-payload");
+        await fs.mkdir(dir, { recursive: true });
+        const fname = `${Date.now()}_${statusCode}_${(model || "unknown").replace(/[^a-z0-9_.-]/gi, "_")}.json`;
+        const safeBody = (() => {
+          try { return JSON.parse(JSON.stringify(finalBody || translatedBody || null)); }
+          catch { return null; }
+        })();
+        const dump = {
+          time: new Date().toISOString(),
+          provider, model, connectionId, statusCode,
+          message: typeof message === "string" ? message : JSON.stringify(message),
+          msgCount: Array.isArray(translatedBody?.contents) ? translatedBody.contents.length : (Array.isArray(translatedBody?.messages) ? translatedBody.messages.length : 0),
+          toolCount: Array.isArray(translatedBody?.tools?.[0]?.functionDeclarations) ? translatedBody.tools[0].functionDeclarations.length : (Array.isArray(translatedBody?.tools) ? translatedBody.tools.length : 0),
+          translatedBody: safeBody
+        };
+        await fs.writeFile(path.join(dir, fname), JSON.stringify(dump, null, 2));
+        log?.warn?.("DIAG", `Saved Gemini payload to logs/gemini-payload/${fname}`);
+      }
+    } catch (diagErr) {
+      log?.warn?.("DIAG", `Failed to dump Gemini payload: ${diagErr.message}`);
+    }
+
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
