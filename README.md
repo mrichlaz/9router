@@ -1,5 +1,5 @@
 > [!TIP]
-> ### 📦 Panduan Instalasi Cepat untuk Pengguna [ACS (Agnostic Config Suites)](https://uikode.com/acs/)
+> ### 📦 Panduan Instalasi Cepat (Bersih, Cepat, Zero-Build)
 > Untuk mendapatkan seluruh stabilitas patch produksi ini secara instan, bersih, dan tanpa perlu compile Next.js lokal, gunakan release tarball prebuilt resmi di bawah ini:
 >
 > 
@@ -19,9 +19,6 @@
 >   --name 9router \
 >   ghcr.io/mrichlaz/9router:latest
 > ```
-> **Pengguna Dashboard ACS**
-> 
-> *Setelah instalasi selesai, cukup jalankan `acs service start 9router` atau Cukup klik Start pada Service 9router di dashboard ACS (otomatis termanage).
 
 ---
 
