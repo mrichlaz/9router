@@ -30,7 +30,10 @@ function fail(message) {
 }
 
 function git(args, options = {}) {
-  return execFileSync("git", args, { cwd: rootDir, encoding: "utf8", ...options }).trim();
+  // With stdio: "inherit" (used for pushes, so progress is visible) execFileSync
+  // returns null instead of a string — guard before trimming.
+  const result = execFileSync("git", args, { cwd: rootDir, encoding: "utf8", ...options });
+  return typeof result === "string" ? result.trim() : "";
 }
 
 function parseArgs(argv) {
