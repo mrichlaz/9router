@@ -1,9 +1,17 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image (from source)
 
+# Fork note: this is the upstream from-source image build (compiles Next.js
+# inside the image). It is manual-only here on purpose.
+#
+# `.github/workflows/release.yml` is the fork's release path: it fires on `v*`
+# tags and pushes a zero-build image to the SAME GHCR tag
+# (ghcr.io/<owner>/9router:<version>). If both workflows listened on tag push
+# they would race to create that tag, and whichever finished last would win
+# non-deterministically. Keeping this one manual avoids the race.
+#
+# Use this workflow only when you deliberately want a from-source image (for
+# example to rebuild an old tag with current build fixes).
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       release_tag:

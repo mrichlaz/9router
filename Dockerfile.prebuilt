@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1.7
+#
+# Zero-build image: installs the prebuilt release tarball instead of compiling
+# Next.js inside the image. This is the container equivalent of the README's
+# "Opsi 1" install:
+#
+#   npm install -g https://github.com/<owner>/9router/releases/latest/download/9router-latest.tgz
+#
+# Because the tarball already contains the compiled standalone app, this image
+# needs no python3/make/g++ toolchain, no `next build`, and no npm registry
+# access at build time beyond the release asset itself. It builds in seconds
+# and stays small.
+#
+# The application code is byte-identical to what the npm/npx install runs — both
+# consume the same `9router-latest.tgz` produced by .github/workflows/release.yml.
+#
+# Requires Node >= 22.5 for the built-in `node:sqlite` driver. sql.js (pure
+# WASM) is bundled in the tarball as the fallback, so no native module is
+# compiled or downloaded.
+
+ARG NODE_IMAGE=node:22-alpine
+
+FROM ${NODE_IMAGE}
+
+ARG APP_VERSION=unknown
+ARG TARBALL_URL
+# Empty by default: `set -u` treats a declared-but-unset ARG as unset, so every
+# expansion below uses the :- form.
+ARG TARBALL_SHA256=""
+ARG ALPINE_MIRROR=dl-cdn.alpinelinux.org
+
+# Optional regional mirror for restricted networks; defaults to upstream Alpine.
+RUN if [ "$ALPINE_MIRROR" != "dl-cdn.alpinelinux.org" ]; then \
+      sed -i "s|dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories; \
+    fi
+
+LABEL org.opencontainers.image.title="9router" \
+      org.opencontainers.image.description="9Router — local AI routing gateway + dashboard (prebuilt)" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
+ENV NODE_ENV=production \
+    PORT=20128 \
+    HOSTNAME=0.0.0.0 \
+    DATA_DIR=/app/data \
+    NEXT_TELEMETRY_DISABLED=1
+
+RUN apk add --no-cache curl su-exec
+
+# Fail the build if TARBALL_URL is missing rather than producing an image that
+# silently contains no application.
+RUN test -n "${TARBALL_URL:-}" || { echo "TARBALL_URL build-arg is required"; exit 1; }
+
+# Download, checksum-verify, and unpack the prebuilt package. The tarball is a
+# standard `npm pack` output, so `package/` is stripped to expose cli.js + app/.
+RUN set -eux; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/9router.tgz "${TARBALL_URL:-}"; \
+    if [ -n "${TARBALL_SHA256:-}" ]; then \
+      echo "${TARBALL_SHA256}  /tmp/9router.tgz" | sha256sum -c -; \
+    fi; \
+    mkdir -p /opt/9router; \
+    tar -xzf /tmp/9router.tgz -C /opt/9router --strip-components=1; \
+    rm -f /tmp/9router.tgz; \
+    test -f /opt/9router/app/custom-server.js || { echo "custom-server.js missing from tarball"; exit 1; }; \
+    test -f /opt/9router/app/server.js || { echo "standalone server.js missing from tarball"; exit 1; }
+
+# Run from the standalone app root so `require("./server.js")` and Next's
+# relative asset resolution behave exactly as the CLI launcher does
+# (cli/cli.js spawns the server with cwd = <pkg>/app).
+WORKDIR /opt/9router/app
+
+RUN mkdir -p /app/data && chown -R node:node /app /opt/9router
+
+# Drop privileges while keeping a bind-mounted /app/data writable: the entrypoint
+# re-chowns the volume (mounted as root on most hosts) then hands off to `node`.
+RUN printf '#!/bin/sh\nchown -R node:node /app/data 2>/dev/null || true\nexec su-exec node "$@"\n' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+EXPOSE 20128
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||20128)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["node", "custom-server.js"]

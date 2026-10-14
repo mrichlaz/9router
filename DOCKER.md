@@ -2,6 +2,12 @@
 
 Run 9Router in a container. Published image: [`decolua/9router`](https://hub.docker.com/r/decolua/9router) — multi-platform `linux/amd64` + `linux/arm64`.
 
+> **Fork images.** This fork also publishes a zero-build image to
+> `ghcr.io/mrichlaz/9router` from the same prebuilt tarball the README installs,
+> built by `.github/workflows/release.yml` on every `v*` tag. It needs no
+> toolchain, builds in seconds, and is the image to use on EasyPanel — see
+> [`docs/EASYPANEL.md`](docs/EASYPANEL.md).
+
 ---
 
 # 👤 For Users

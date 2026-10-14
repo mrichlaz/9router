@@ -5,11 +5,19 @@
 > 
 > **Opsi 1: Instalasi Global Paket Prebuilt (Direkomendasikan — Bersih, Cepat, Zero-Build)**
 > ```bash
-> npm install -g https://github.com/andyvandaric/9router/releases/latest/download/9router-latest.tgz
+> npm install -g https://github.com/mrichlaz/9router/releases/latest/download/9router-latest.tgz
 > ```
 > **Opsi 2: Jalankan Langsung via npx**
 > ```bash
-> npx https://github.com/andyvandaric/9router/releases/latest/download/9router-latest.tgz
+> npx https://github.com/mrichlaz/9router/releases/latest/download/9router-latest.tgz
+> ```
+> **Opsi 3: Docker / EasyPanel (image zero-build, kode identik dengan Opsi 1)**
+> ```bash
+> docker run -d -p 20128:20128 \
+>   -v "$HOME/.9router:/app/data" \
+>   -e DATA_DIR=/app/data \
+>   --name 9router \
+>   ghcr.io/mrichlaz/9router:latest
 > ```
 > **Pengguna Dashboard ACS**
 > 

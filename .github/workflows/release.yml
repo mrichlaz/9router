@@ -1,0 +1,349 @@
+name: Release (prebuilt tarball + GHCR image)
+
+# Tag-driven release for this fork.
+#
+# One `git push origin vX.Y.Z` produces the exact three artifacts the fork
+# documents as "Opsi 1" — a zero-build prebuilt package plus a container image
+# built from that same package:
+#
+#   1. `9router-<version>.tgz`  — versioned prebuilt package (npm pack of cli/)
+#   2. `9router-latest.tgz`     — stable alias, the URL the README installs from
+#   3. `ghcr.io/<owner>/9router:<version>` (+ `:latest` for stable tags)
+#
+# The image is built by Dockerfile.prebuilt, which installs the tarball from the
+# release created in this same run — so the container and `npm install -g
+# <tarball>` run byte-identical application code.
+#
+# The upstream from-source image workflow (.github/workflows/docker-publish.yml)
+# is manual-only on this fork so the two do not race on the same GHCR tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to build and release"
+        required: true
+        type: string
+
+# Serialize releases so an older run cannot finish after a newer one and move
+# `latest` backwards.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      image: ${{ steps.v.outputs.image }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 1
+
+      - name: Validate tag against both package versions
+        id: v
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag must look like vX.Y.Z or vX.Y.Z-<prerelease>, got '$TAG'"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          ROOT_VERSION="$(node -p "require('./package.json').version")"
+          CLI_VERSION="$(node -p "require('./cli/package.json').version")"
+
+          if [[ "$ROOT_VERSION" != "$VERSION" || "$CLI_VERSION" != "$VERSION" ]]; then
+            echo "::error::tag '$TAG' does not match package.json ($ROOT_VERSION) / cli/package.json ($CLI_VERSION)"
+            echo "Bump both first:  node scripts/release.js $VERSION"
+            exit 1
+          fi
+
+          PRERELEASE=false
+          [[ "$VERSION" == *-* ]] && PRERELEASE=true
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Validated $TAG (image ${GITHUB_REPOSITORY,,}:$VERSION, prerelease=$PRERELEASE)"
+
+  tarball:
+    name: Build prebuilt tarball
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Root deps first — cli/scripts/build-cli.js runs `next build` from the
+      # repo root, so the dashboard/gateway tree must be installed.
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      # --ignore-scripts skips cli/hooks/postinstall.js, which would fetch native
+      # better-sqlite3 into ~/.9router/runtime. The image and Node >=22.5 use
+      # node:sqlite, and sql.js is bundled, so that warm-up is unnecessary here.
+      - name: Install CLI dependencies
+        working-directory: cli
+        run: npm install --no-audit --no-fund --ignore-scripts
+
+      - name: Build and pack the prebuilt CLI package
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run cli:pack
+
+      - name: Normalize release asset names
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -f "9router-${VERSION}.tgz" || {
+            echo "::error::expected 9router-${VERSION}.tgz was not produced"
+            ls -lh ./*.tgz 2>/dev/null || true
+            exit 1
+          }
+          cp "9router-${VERSION}.tgz" 9router-latest.tgz
+          ls -lh ./*.tgz
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-tarball
+          path: 9router-*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, tarball]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Download tarball artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-tarball
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          # Prefer the CHANGELOG section for this version; fall back to generated
+          # notes when the version has no entry yet.
+          NOTES="$(mktemp)"
+          if ! node - "$VERSION" > "$NOTES" <<'NODE'
+          const fs = require("fs");
+          const version = process.argv[2];
+          let text = "";
+          try { text = fs.readFileSync("CHANGELOG.md", "utf8"); } catch { process.exit(1); }
+          const lines = text.split("\n");
+          // Headings look like "# v0.5.99 (2026-10-08)", so match the version
+          // token rather than requiring the whole line to equal it.
+          const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const heading = new RegExp(`^#\\s+v${escaped}(\\s|$)`);
+          const start = lines.findIndex((l) => heading.test(l.trim()));
+          if (start === -1) process.exit(1);
+          let end = lines.length;
+          for (let i = start + 1; i < lines.length; i++) {
+            if (/^#\s+v\d/.test(lines[i])) { end = i; break; }
+          }
+          const body = lines.slice(start + 1, end).join("\n").trim();
+          if (!body) process.exit(1);
+          process.stdout.write(body + "\n");
+          NODE
+          then
+            echo "::warning::no CHANGELOG section for v$VERSION — using generated notes"
+            NOTES_ARGS=(--generate-notes)
+          else
+            NOTES_ARGS=(--notes-file "$NOTES")
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — uploading assets with --clobber"
+            gh release upload "$TAG" ./9router-*.tgz --clobber
+          else
+            PRE_ARGS=()
+            [[ "$PRERELEASE" == "true" ]] && PRE_ARGS=(--prerelease)
+            gh release create "$TAG" \
+              --title "$TAG" \
+              "${NOTES_ARGS[@]}" \
+              "${PRE_ARGS[@]}" \
+              ./9router-*.tgz
+          fi
+
+          echo "### Release $TAG" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016  # single quotes are required: this is jq, not shell
+          gh release view "$TAG" --json assets \
+            --jq '.assets[] | "- `\(.name)` (\(.size) bytes)"' >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Build and push GHCR image
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION}"
+            # A prerelease publishes only its numbered tag; a stable tag also
+            # moves `latest`.
+            if [[ "$PRERELEASE" == "false" ]]; then echo "${IMAGE}:latest"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the zero-build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.prebuilt
+          push: true
+          # No compilation happens in this image (it downloads a prebuilt
+          # tarball), so building the second architecture under QEMU is cheap.
+          # EasyPanel hosts are often arm64 — publish both.
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ needs.prepare.outputs.version }}
+            TARBALL_URL=https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/9router-latest.tgz
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=9router-prebuilt
+          cache-to: type=gha,mode=max,scope=9router-prebuilt
+          provenance: false
+          sbom: false
+
+      - name: Smoke-test the pushed image
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          container="9router-release-smoke-${GITHUB_RUN_ID}"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+
+          docker run --detach --name "$container" --publish 20128:20128 "${IMAGE}:${VERSION}"
+
+          for attempt in {1..45}; do
+            if curl --fail --silent --show-error http://127.0.0.1:20128/api/health; then
+              echo
+              echo "release image health check passed"
+              exit 0
+            fi
+            if (( attempt % 5 == 0 )); then
+              echo "waiting for release image health check (${attempt}/45)" >&2
+            fi
+            sleep 2
+          done
+
+          echo "release image health check failed; container logs follow:" >&2
+          docker logs "$container" || true
+          exit 1
+
+      # GHCR packages are private by default. EasyPanel needs to pull without a
+      # registry login, so try to make the package public. This is best-effort:
+      # the endpoint can reject a repo-scoped GITHUB_TOKEN, and the release must
+      # not fail just because visibility needs a manual toggle in package settings.
+      - name: Make the GHCR package public (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [[ "$OWNER" == "$(gh api user --jq .login 2>/dev/null || true)" ]]; then
+            gh api --method PATCH "/user/packages/container/${PACKAGE}" -f visibility=public
+          else
+            gh api --method PATCH "/orgs/${OWNER}/packages/container/${PACKAGE}" -f visibility=public
+          fi
+
+      - name: Job summary
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          {
+            echo "### Container image"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+            echo "Pull for EasyPanel: \`${IMAGE}:${VERSION}\`"
+            echo
+            echo "If the pull is denied, open the package settings and set visibility to **Public**."
+          } >> "$GITHUB_STEP_SUMMARY"
