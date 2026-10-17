@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { DefaultExecutor } from "./default.js";
 
 /**
@@ -18,19 +18,6 @@ function uuid7() {
   buf[5] = ms & 0xff;
   buf[6] = (buf[6] & 0x0f) | 0x70; // version 7
   buf[8] = (buf[8] & 0x3f) | 0x80; // RFC variant
-  return dashed(buf);
-}
-
-/**
- * Same uuid7 shape, but derived from a session key so retries of a turn and the
- * later turns of one conversation keep their `X-Conversation-ID`. The timestamp
- * field is drawn from the digest too — upstream does not read it, and the id
- * has to be deterministic for the id to stay stable.
- */
-function stableUuid7(key) {
-  const buf = Buffer.from(createHash("sha256").update(key).digest().subarray(0, 16));
-  buf[6] = (buf[6] & 0x0f) | 0x70;
-  buf[8] = (buf[8] & 0x3f) | 0x80;
   return dashed(buf);
 }
 
@@ -73,26 +60,6 @@ function writeHeader(headers, name, value) {
   headers[key || name] = value;
 }
 
-// Session key for the conversation id: an explicit session wins, then the
-// opening user message (typed blocks joined).
-function sessionKey(body) {
-  const explicit =
-    (typeof body?.session_id === "string" && body.session_id) ||
-    (typeof body?.prompt_cache_key === "string" && body.prompt_cache_key) ||
-    (typeof body?.conversation_id === "string" && body.conversation_id) ||
-    null;
-  if (explicit) return explicit;
-  const firstUser = Array.isArray(body?.messages)
-    ? body.messages.find((m) => m?.role === "user")
-    : null;
-  const text = typeof firstUser?.content === "string"
-    ? firstUser.content
-    : Array.isArray(firstUser?.content)
-      ? firstUser.content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n")
-      : "";
-  return text ? `cbai:${text}` : null;
-}
-
 /**
  * Attach the header family the gateway's channel verification demands (HTTP 400
  * code 11128 "conversation id missing" without it), mirroring what the official
@@ -111,15 +78,20 @@ function sessionKey(body) {
  * part of the requirement — it mirrors the message id because the client sends
  * it that way.
  *
+ * Every id is fresh per request, including `X-Conversation-ID`: the 5.8.4
+ * capture sends a new one on every call and the gateway keeps no history under
+ * it (PR #4949). Deriving it from the session key was worse than inert — the
+ * key was the opening user message, so unrelated sessions that start with the
+ * same prompt shared one id, an anomalous pattern the gateway can see.
+ *
  * Values that already exist and are non-empty are preserved, so a caller
  * tracking its own conversation keeps it; blank values count as absent. The
  * function is idempotent: a second pass over an already-filled bag rotates
  * nothing.
  */
-export function withConversationHeaders(headers, body = null) {
+export function withConversationHeaders(headers) {
   if (!readHeader(headers, "X-Conversation-ID")) {
-    const key = sessionKey(body);
-    writeHeader(headers, "X-Conversation-ID", key ? stableUuid7(key) : uuid7());
+    writeHeader(headers, "X-Conversation-ID", uuid7());
   }
   if (!readHeader(headers, "X-Conversation-Request-ID")) {
     writeHeader(headers, "X-Conversation-Request-ID", hex32());
@@ -171,7 +143,7 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
 
   // The intl gateway's channel verification rejects any request that does not
   // carry the X-Conversation-* header family the official client sends on every
-  // turn. The derivation rules live in withConversationHeaders above.
+  // turn. withConversationHeaders above fills the whole family.
   //
   // **Fail closed.** buildHeaders runs outside the fetch try/catch in base.js,
   // so an unexpected error here would surface as a generic 502 with no cause —
@@ -180,7 +152,7 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
   buildHeaders(credentials, stream = true, url, model, body = null) {
     const headers = super.buildHeaders(credentials, stream, url, model, body);
     try {
-      return withConversationHeaders(headers, body);
+      return withConversationHeaders(headers);
     } catch (error) {
       throw new Error(
         `CodeBuddy channel verification: could not attach the X-Conversation-* family `
@@ -237,6 +209,27 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
             status: 429,
             message: msg || "CodeBuddy frequency limit (6004)",
             resetsAtMs,
+          };
+        }
+
+        // 11140 "request illegal" is the gateway's risk-control block: the body
+        // carries displayMsg["en"] = "Your account has been restricted due to
+        // unusual activity". It is account-scoped, not request-scoped — an
+        // identical body succeeds on a healthy account — so surface it as 403
+        // with the upstream wording and requestId. Without this branch the raw
+        // JSON body becomes the error message, and once the account goes into
+        // the 403 cooldown the caller only sees a 503 "all accounts unavailable"
+        // wrapping that JSON, which reads like a gateway bug.
+        if (data?.code === 11140) {
+          const display = data?.displayMsg?.en || data?.displayMsg?.["zh-hans"] || data?.msg || "";
+          return {
+            status: 403,
+            message:
+              'CodeBuddy Intl account restricted upstream (11140 "request illegal")'
+              + (display ? `: ${display}` : "")
+              + ". This is a risk-control block on the account, not the request: switch account/provider "
+              + "or wait for the block to lift."
+              + (data?.requestId ? ` requestId=${data.requestId}` : ""),
           };
         }
 
