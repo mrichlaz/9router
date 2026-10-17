@@ -1,5 +1,11 @@
 # v0.5.99-andyvandaric-patch (2026-10-15, fork)
 
+## Fixes (fork: CodeBuddy Intl channel verification — upstream PRs #4949 + #4944)
+- **CodeBuddy Intl (WorkBuddy AI)**: merge upstream PR #4949 — chat gateway and billing endpoint move to `www.workbuddy.ai` (same IP/back end as `codebuddy.ai`); outbound identity aligned to the official 5.8.4 desktop client: UA `WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`, `X-IDE-Type/-Name/-Version` = `WorkBuddy`/`5.8.4`, plus `X-Private-Data`/`X-Agent-Intent`/`X-Agent-Purpose`/`X-Agent-Type`/`X-Domain`
+- **CodeBuddy Intl**: merge upstream PR #4944 — every request now carries the `X-Conversation-*` family the gateway's channel verification demands (HTTP 400 code 11128 `conversation id missing` without it): dashed-UUIDv7 `X-Conversation-ID` derived stably from the session key (or the opening user message), 32-hex `X-Conversation-Request-ID`/`X-Root-Request-ID` and `X-Conversation-Message-ID`/`X-Request-ID` pairs, plus the W3C/B3 trace family
+- **CodeBuddy Intl**: caller-supplied ids are preserved through case-insensitive lookup (no duplicate-key join corruption), a second pass is idempotent, `buildHeaders` fails closed naming the gate, and `parseError` reports 11128 `conversation id missing` as channel verification while leaving the `first message is not system prompt` variant alone
+- **Tests/baseline**: `tests/unit/codebuddy-intl-channel-verification.test.js` covers both PRs' invariants; `tests/__baseline__/providers-baseline.json` re-synced for the codebuddy-intl identity change (remaining `codex`/`kimi`/`minimax-code` verify-providers diffs are pre-existing)
+
 ## Fixes (fork: OpenCode free-tier restoration)
 - **OpenCode**: merge upstream PR #4840 — free-tier inference moved from deprecated `/zen/v1/*` to `/inference/v1/*`; UA `opencode/latest/2.0.29/cli`; canonical `read` + `shell` tool fingerprint with `bash`→`shell` aliasing
 - **OpenCode**: merge upstream PR #4842 — v2 client fingerprint; valid session-id counters; verbatim `read`/`shell` definitions with `*_client` aliasing; rejected `x-opencode-request` dropped; `tool_choice: "none"` never forced
