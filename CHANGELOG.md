@@ -1,3 +1,10 @@
+# v0.5.101 (2026-10-17)
+
+## Fixes (fork: CodeBuddy Intl)
+- **CodeBuddy Intl**: `X-Conversation-ID` is now fresh per request, matching the 5.8.4 capture (the gateway keeps no history under it). The previous session-derived id collided across unrelated sessions that opened with the same user message — an anomalous fingerprint for upstream risk control.
+- **CodeBuddy Intl**: `parseError` classifies 403 code `11140 "request illegal"` as an upstream risk-control block on the account, surfacing the vendor's `displayMsg` and `requestId` instead of the raw JSON body wrapped in a 503 "all accounts unavailable".
+- **Tests**: `tests/unit/codebuddy-intl-channel-verification.test.js` — 27 cases (fresh-id invariants, caller-supplied id preservation, 11140 variants).
+
 # v0.5.100 (2026-10-17)
 
 ## Fixes (fork: CodeBuddy Intl channel verification — upstream PRs #4949 + #4944)
