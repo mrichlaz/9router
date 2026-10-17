@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
 import { PROVIDER_MODELS, getModelTargetFormat } from "../../open-sse/config/providerModels.js";
-import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { OpenCodeExecutor } from "../../open-sse/executors/opencode.js";
 import "../translator/registerAll.js";
@@ -17,32 +16,17 @@ const input = [{
 }];
 
 describe("OpenCode Free Muse Spark thinking", () => {
-  it("advertises reasoning and the requested model limits", () => {
-    expect(PROVIDER_MODELS.oc?.some((model) => model.id === MODEL)).toBe(true);
-    expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(true);
-    for (const m of [MODEL, "muse-spark-1.3-contributor-free", "muse-spark-1.4-contributor-free", "muse-spark-2.0-contributor-free"]) {
+  it("declares live muse-1.2 and keeps dead 1.3/union out of the registry", () => {
+    expect(PROVIDER_MODELS.oc?.some((model) => model.id === "muse-spark-1.3-contributor-free")).toBe(false);
+    expect(PROVIDER_MODELS.oc?.some((model) => model.id === "union-alpha")).toBe(false);
+    // Capabilities stay available so re-listed muse models get auto-adopted.
+    for (const m of [MODEL, "muse-spark-1.4-contributor-free", "muse-spark-2.0-contributor-free"]) {
       expect(getCapabilitiesForModel(PROVIDER, m)).toMatchObject({
         reasoning: true,
         thinkingFormat: "openai",
         contextWindow: 1048576,
         maxOutput: 131072,
       });
-      expect(getCapabilitiesForModel(PROVIDER, `oc/${m}`)).toMatchObject({
-        reasoning: true,
-        contextWindow: 1048576,
-        maxOutput: 131072,
-      });
-      expect(getThinkingLevels(PROVIDER, m)).toEqual([
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-      ]);
-      expect(getModelTargetFormat("oc", m)).toBe(FORMATS.OPENAI_RESPONSES);
-      expect(getModelTargetFormat("opencode", m)).toBe(FORMATS.OPENAI_RESPONSES);
-      expect(getModelTargetFormat("openrouter", m)).toBeNull();
     }
   });
 
@@ -71,7 +55,6 @@ describe("OpenCode Free Muse Spark thinking", () => {
 
     const executor = new OpenCodeExecutor();
 
-    expect(getModelTargetFormat("oc", "union-alpha")).toBe(FORMATS.CLAUDE);
     const url = executor.buildUrl("union-alpha");
     expect(url).toBe("https://opencode.ai/inference/v1/messages");
     expect(executor.buildHeaders({}, true, url)).toMatchObject({

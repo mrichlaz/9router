@@ -1,3 +1,48 @@
+# v0.5.107-andyvandaric-patch (2026-10-17, fork)
+
+## Fixes (fork: installer resilience)
+- **install.ps1 / install.sh**: an upgrade that aborted inside the install window (a failed `npm install`) used to leave the stack exactly as that window had left it - service stopped and the ACS Watchdog still paused/disabled - because both restorations only ran at the end of the happy path. State is now restored on every exit path: `install.ps1` via a scope `trap`, `install.sh` via its EXIT trap (which previously only cleaned the temp dir). The watchdog is always re-enabled, and when the service was stopped for the window it is started again (acs first, then the previously installed CLI - windowless spawn / `nohup` - with a health check), and the script still exits non-zero so a failed upgrade is never mistaken for a success.
+- **install.ps1 / install.sh**: retry the `npm install` once before failing. Windows npm can die with an empty log and exit 1 when a supervisor window races the install (observed live: the tarball download, service stop and watchdog pause all succeeded, then npm exited 1 with a zero-byte log), and a single retry recovers it.
+
+## Verification
+- **Fault injection**: `install.ps1` copy with the npm step forced to fail (`cmd /c exit 1`) -> both attempts fail, `Install FAILED (previous state restored)` printed, exit code 1, and the post-run state was verified healthy: watchdog `Ready`, `9router` listening on 20128, `/api/health` -> `{"ok":true}`.
+- **Syntax**: `install.ps1` parses clean (PowerShell AST, 0 errors); `install.sh` passes `bash -n`.
+
+# v0.5.106-andyvandaric-patch (2026-10-17, fork)
+
+## Fixes (fork: OpenCode free-tier request truth)
+- **OpenCode (403)**: rotate the identity-bound `stableSessionId` on `403 FreeTierError`, not only on `429`. Upstream replaced the flood-limit body (`429 FreeUsageLimitError`) with `403 FreeTierError` for stale/exhausted stable sessions, so the executor kept replaying a poisoned identity for up to the session TTL (2h). `execute()` now evicts the stable session and retries once on either rejection; caller-native/derived sessions still pass through untouched, and non-gate 403s are surfaced to the client as-is.
+- **OpenCode free GLM (`#4985`)**: `glm-5.3-flash-free` no longer emits the z.ai `thinking` object. The free endpoint is OpenAI-compatible and rejects both `thinking` and `enable_thinking` with `400 [unknown_parameter] invalid request body: json: unknown field "thinking"`, while accepting `reasoning_effort` - yet the model inherited the global `thinkingFormat: zai` entry, so every Claude Code request carrying a thinking setting failed. A `PROVIDER_CAPABILITIES` override now pins it to `thinkingFormat: openai` (the `oc` combo alias is mapped too, and the capability fields the override short-circuits - vision/pdf/context/output - are carried over), mirroring the existing `opencode-go` override for the same model.
+
+## Verification
+- **Wire probes (live, free endpoint)**: `thinking:{enabled}` -> 400, `enable_thinking:true` -> 400, `reasoning_effort` low|high|max -> 200.
+- **End-to-end** (real translator + executor, providers `opencode` and alias `oc`): `thinking` absent, `reasoning_effort:"low"`, fingerprint tools `["Read"]`, upstream **HTTP 200** with a live streamed completion.
+- **Tests**: `opencode-free-thinking-format` (new, 4/4) and `opencode-session-rotation` (7/7) pass; neighbouring unit + translator suites 132 pass, with the single pre-existing `GLM-5.2` failure confirmed present at HEAD via stash baseline.
+
+# v0.5.105-andyvandaric-patch (2026-10-17, fork)
+
+## Installers (fork: one-command per-user installer)
+- **install.ps1 / install.sh**: unified Windows + Linux/macOS installer replacing the flaky `npm install -g` one-liner (the Windows `npm error EBUSY: resource busy or locked, rename` failure). Flow: download tarball first -> acs-aware graceful stop (`acs service stop 9router --force`, falls back to process scan + port kill for non-acs machines), ACS Watchdog scheduled task paused during the upgrade window and guaranteed re-enabled at the end -> stale global purge + stale shim cleanup (nvm prefix root) -> per-user install into `~/.9router/cli` (no admin, immune to locked global dirs) -> PATH wiring -> silent background start (ProcessStartInfo `CreateNoWindow` / `nohup`, zero terminal flash) -> `/api/health` verification. Version pinning via `-Version X.Y.Z` / `--version X.Y.Z`; `-NoStart` / `--no-start` supported. Data in `~/.9router` untouched.
+- **README**: Quick Start + ACS tip block rewritten around the installer one-liners; legacy npm/npx paths demoted to fallback with EBUSY warning.
+
+## Fixes (fork: OpenCode free-tier registry truth + release automation)
+- **OpenCode registry**: restore `muse-spark-1.2-contributor-free` — dashboard live probe returns HTTP 200 while the `/models` listing omits it; only `muse-spark-1.3-contributor-free` is deprecated upstream (410 `ModelDeprecated`). `union-alpha` stays out of the registry (removed from the free tier).
+- **CI (docker-publish)**: fork-patch tags (`vX.Y.Z-andyvandaric-patch`) now validate against their base semver instead of failing the tag↔package.json equality check.
+- **CI (release-assets)**: new one-shot pipeline on fork-patch tag push — builds the CLI tarball (`npm run cli:pack`), creates/updates the GitHub release with notes extracted from this CHANGELOG, and attaches `9router-<version>.tgz` plus the `9router-latest.tgz` alias (`--clobber`) so the README install URL always serves the newest fork patch. FIFO-concurrency-guarded against alias regression.
+
+# v0.5.104-andyvandaric-patch (2026-10-17, fork)
+
+## Fixes (fork: upstream sync + OpenCode free-tier resilience)
+- **Merge**: integrate upstream v0.5.104 (38 commits: Nous Research provider, Gemini 4 Argon, Codex gpt-5.5 retirement, quota auto-ping schedules, usage fixes). Fork custom README/CHANGELOG preserved; `openAICompletionToClaudeMessage` deduplicated into `translator/concerns/claudeMessage.js` with fork's `normalizeClaudeToolInput` kept.
+- **OpenCode free registry**: sync model list with the live tier (verified via `GET /inference/v1/models` 2026-10-17) — removed `muse-spark-1.2/1.3-contributor-free` and `union-alpha`; chat models (`glm-5.3-flash-free`, deepseek/nemotron/longcat/mimo/beam/space-bunny/big-pickle) stream via passthrough; `jev-1.13-free` kept on systemone.
+- **OpenCode**: rotated stable free-tier sessions — a persistent `429 Upstream request failed: Endpoint is unavailable` now evicts the identity-bound `stableSessionId` and retries once with a fresh session (caller-native/derived sessions pass through untouched). Live probes: poisoned stable session → 429, any fresh session → 200.
+- **Tests**: `opencode-session-rotation` (new); `cline-free-tier-models` pricing reconciled with upstream published contributor rate.
+
+## Verification & Packaging
+- **Regression proof**: post-merge full-suite failures (95) are a strict subset of pre-merge failures (102) — the merge fixed 11 and introduced zero real regressions; 4 stale tests pinning dead muse/union models and the minimax translator mock were reconciled, and the stale antigravity retry guard (429=6) now witnesses live values (429=3).
+- **Baseline gates**: `verify-providers.mjs` (94 providers) and `verify-ascii.mjs` (132 tokens) pass byte-per-byte; rotate merged goldens.
+- **Package**: `9router-0.5.104.tgz` (npm `cli:pack`) verified junk-free; installable via `npm install -g ./9router-0.5.104.tgz` to activate the session-rotation fix on existing installs.
+
 # v0.5.102 (2026-10-17)
 
 ## Fixes (fork: CodeBuddy Intl risk-control handling)
@@ -34,12 +79,6 @@
 - **Housekeeping**: remove stray `CLAUDE.md.bak.*` and `open-sse/handlers/chatCore.js.orig` committed by an upstream merge; ignore them going forward
 
 # v0.5.99-andyvandaric-patch (2026-10-15, fork)
-
-## Fixes (fork: CodeBuddy Intl channel verification — upstream PRs #4949 + #4944)
-- **CodeBuddy Intl (WorkBuddy AI)**: merge upstream PR #4949 — chat gateway and billing endpoint move to `www.workbuddy.ai` (same IP/back end as `codebuddy.ai`); outbound identity aligned to the official 5.8.4 desktop client: UA `WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`, `X-IDE-Type/-Name/-Version` = `WorkBuddy`/`5.8.4`, plus `X-Private-Data`/`X-Agent-Intent`/`X-Agent-Purpose`/`X-Agent-Type`/`X-Domain`
-- **CodeBuddy Intl**: merge upstream PR #4944 — every request now carries the `X-Conversation-*` family the gateway's channel verification demands (HTTP 400 code 11128 `conversation id missing` without it): dashed-UUIDv7 `X-Conversation-ID` derived stably from the session key (or the opening user message), 32-hex `X-Conversation-Request-ID`/`X-Root-Request-ID` and `X-Conversation-Message-ID`/`X-Request-ID` pairs, plus the W3C/B3 trace family
-- **CodeBuddy Intl**: caller-supplied ids are preserved through case-insensitive lookup (no duplicate-key join corruption), a second pass is idempotent, `buildHeaders` fails closed naming the gate, and `parseError` reports 11128 `conversation id missing` as channel verification while leaving the `first message is not system prompt` variant alone
-- **Tests/baseline**: `tests/unit/codebuddy-intl-channel-verification.test.js` covers both PRs' invariants; `tests/__baseline__/providers-baseline.json` re-synced for the codebuddy-intl identity change (remaining `codex`/`kimi`/`minimax-code` verify-providers diffs are pre-existing)
 
 ## Fixes (fork: OpenCode free-tier restoration)
 - **OpenCode**: merge upstream PR #4840 — free-tier inference moved from deprecated `/zen/v1/*` to `/inference/v1/*`; UA `opencode/latest/2.0.29/cli`; canonical `read` + `shell` tool fingerprint with `bash`→`shell` aliasing
