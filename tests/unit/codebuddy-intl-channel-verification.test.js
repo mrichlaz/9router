@@ -11,6 +11,8 @@ import { describe, expect, it } from "vitest";
 
 import registry from "../../open-sse/providers/registry/codebuddy-intl.js";
 import { CodeBuddyIntlExecutor, withConversationHeaders } from "../../open-sse/executors/codebuddy-intl.js";
+import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
+import { ACCOUNT_BAN_COOLDOWN_MS, isAccountWideBan } from "../../open-sse/config/errorConfig.js";
 
 const CAPTURED_UA = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0";
 const URL_ = "https://www.workbuddy.ai/v2/chat/completions";
@@ -282,5 +284,68 @@ describe("parseError classifies the 11128 variants", () => {
     const out = exec.parseError({ status: 429 }, body);
     expect(out.status).toBe(429);
     expect(out.resetsAtMs).toBeGreaterThan(0);
+  });
+});
+
+// 11140 is overloaded: qiyworkapi and Buddy2api both classify on the message,
+// never on the code alone. A code-only ban turns ordinary model throttling into
+// a 2h account lock.
+describe("11140 rate-limit variant is throttling, not a ban", () => {
+  const exec = new CodeBuddyIntlExecutor();
+
+  it("stays a retryable 429 with the upstream reset time", () => {
+    const body = JSON.stringify({
+      code: 11140,
+      msg: "The model provider is rate-limiting requests. Resets at 2026-10-17 10:00:00 UTC+8",
+    });
+    const out = exec.parseError({ status: 429 }, body);
+    expect(out.status).toBe(429);
+    expect(out.message).toMatch(/rate-limiting/i);
+    expect(out.message).not.toMatch(/account restricted/i);
+    expect(out.resetsAtMs).toBe(new Date("2026-10-17T10:00:00+08:00").getTime());
+  });
+
+  it("defaults an ambiguous 11140 to 429 rather than a ban", () => {
+    const out = exec.parseError({ status: 403 }, JSON.stringify({ code: 11140, msg: "denied" }));
+    expect(out.status).toBe(429);
+    expect(out.message).not.toMatch(/account restricted/i);
+    expect(out.resetsAtMs).toBeNull();
+  });
+
+  it("still bans the account-restricted wording", () => {
+    const out = exec.parseError({ status: 403 }, JSON.stringify({
+      code: 11140,
+      msg: "request illegal",
+      displayMsg: { en: "Your account has been restricted due to unusual activity" },
+    }));
+    expect(out.status).toBe(403);
+    expect(out.message).toMatch(/account restricted upstream/i);
+    expect(out.message).toMatch(/re-sign in or appeal/i);
+  });
+});
+
+describe("account ban cooldown and lock scope", () => {
+  it("cools the codebuddy-intl ban for two hours", () => {
+    const out = checkFallbackError(
+      403,
+      'CodeBuddy Intl account restricted upstream (11140 "request illegal"): restricted',
+      0,
+      "codebuddy-intl",
+    );
+    expect(out.shouldFallback).toBe(true);
+    expect(out.cooldownMs).toBe(ACCOUNT_BAN_COOLDOWN_MS);
+    expect(ACCOUNT_BAN_COOLDOWN_MS).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it("leaves other providers' 403 on the short cooldown", () => {
+    const out = checkFallbackError(403, "CodeBuddy Intl account restricted upstream", 0, "codebuddy-cn");
+    expect(out.cooldownMs).toBe(2 * 60 * 1000);
+  });
+
+  it("scopes the ban to the credential, not one model", () => {
+    expect(isAccountWideBan("codebuddy-intl", "…account restricted upstream…")).toBe(true);
+    expect(isAccountWideBan("codebuddy-cn", "…account restricted upstream…")).toBe(false);
+    // Rate-limit answers must never take the account-wide path.
+    expect(isAccountWideBan("codebuddy-intl", "The model provider is rate-limiting requests.")).toBe(false);
   });
 });

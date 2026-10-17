@@ -1,3 +1,11 @@
+# v0.5.102 (2026-10-17)
+
+## Fixes (fork: CodeBuddy Intl risk-control handling)
+- **CodeBuddy Intl**: `11140` is overloaded upstream — the same code carries both the account ban (`"request illegal"` / account-restricted `displayMsg`) and ordinary model throttling (`"The model provider is rate-limiting requests."`). `parseError` now branches on the wording and defaults the ambiguous remainder to a retryable `429`, so throttling no longer becomes an account ban. Corroborated by two independent gateways (`qiyworkapi` `Classify`, `Buddy2api` `account_rule`).
+- **CodeBuddy Intl**: account bans now cool for `ACCOUNT_BAN_COOLDOWN_MS` (2h) instead of the generic 403's 2 minutes, and lock the whole credential (`modelLock___all`) rather than only the model that tripped it — a ban is account-scoped, so other models must not keep hitting it. Both reference gateways treat `11140 request illegal` as terminal until re-login/appeal.
+- **CodeBuddy Intl**: per-account traffic shaping (`src/sse/services/accountTraffic.js`): at most 2 in-flight requests per connection and 300 ms between request starts, with the slot held for the whole stream and released on error/cancel. Parallel tool calls can no longer stack on one credential — the density signal both reference gateways throttle (qiyworkapi `max_in_flight` + 100 ms pick gap; global realm lower than CN). Fails open after 15 s so a leaked slot cannot become an outage.
+- **Tests**: same file — 33 cases (11140 split, ban cooldown/scope); new `tests/unit/account-traffic.test.js` — 8 cases (cap, pacing, fail-open, stream-bound release).
+
 # v0.5.101 (2026-10-17)
 
 ## Fixes (fork: CodeBuddy Intl)

@@ -41,6 +41,13 @@ export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
+// Account-level upstream bans (not rate limits) do not clear on a short
+// cooldown. Both independent WorkBuddy gateways treat 11140 "request illegal"
+// as a ban that only re-login/appeal clears (qiyworkapi disables the account,
+// magpie rests it 2h). A short cooldown makes the gateway hammer a banned
+// credential on every subsequent request, which is what inflates the ban.
+export const ACCOUNT_BAN_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+
 // Cooldown durations (ms)
 const COOLDOWN = {
   long: 2 * 60 * 1000,
@@ -58,6 +65,10 @@ const COOLDOWN = {
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
+  // Canonical wording emitted by codebuddy-intl parseError for an account-level
+  // ban. Must precede the generic 403 rule; code 11140 is overloaded (it also
+  // carries model rate-limit answers), so the message is the only safe signal.
+  { provider: "codebuddy-intl", text: "account restricted upstream", cooldownMs: ACCOUNT_BAN_COOLDOWN_MS },
   { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: MAX_RATE_LIMIT_COOLDOWN_MS },
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
@@ -75,6 +86,17 @@ export const ERROR_RULES = [
   { status: 404, cooldownMs: COOLDOWN.long },
   { status: 429, backoff: true },
 ];
+
+// True when the error is an account-scoped ban, so every model on the
+// credential must be locked — locking only the model that happened to hit it
+// leaves the same banned account to be rediscovered on each other model.
+// Matches our own canonical parseError wording; the upstream code is not a safe
+// signal (11140 also carries model rate-limit answers).
+export function isAccountWideBan(provider, errorText) {
+  return provider === "codebuddy-intl"
+    && typeof errorText === "string"
+    && errorText.toLowerCase().includes("account restricted upstream");
+}
 
 // Backward compat: COOLDOWN_MS object (used by index.js re-export)
 export const COOLDOWN_MS = {

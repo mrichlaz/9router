@@ -8,6 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
+import { acquireAccountLease, leaseBoundResponse } from "../services/accountTraffic.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -278,6 +279,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    // Density control: parallel requests must not stack on one credential.
+    // Acquired per attempt and released on failure or when the stream ends.
+    let lease = await acquireAccountLease(provider, credentials.connectionId);
+    try {
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -322,7 +327,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) {
+      // The slot stays taken until the stream ends; ownership moves to the body.
+      const response = leaseBoundResponse(result.response, lease);
+      lease = null;
+      return response;
+    }
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
@@ -351,5 +361,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     return result.response;
+    } finally {
+      // Failure, fallback, or throw: the next account may use this slot now.
+      lease?.release();
+    }
   }
 }

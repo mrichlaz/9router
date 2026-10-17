@@ -30,6 +30,22 @@ function hex32() {
   return uuid7().replace(/-/g, "");
 }
 
+/**
+ * Parse the upstream's own reset wall-clock out of a rate-limit message, e.g.
+ * "超出频率限制 2026-10-16 10:00:00 UTC+8". Absent or malformed → null (the
+ * caller falls back to its normal cooldown), never a guessed timestamp.
+ */
+function parseResetAt(message) {
+  const match = String(message || "").match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);
+  if (!match) return null;
+  const [, date, time, zone] = match;
+  const tz = zone
+    ? (zone.includes(":") ? (zone.startsWith("+") ? zone : `+${zone}`) : `+${zone.padStart(2, "0")}:00`)
+    : "+08:00";
+  const at = new Date(`${date}T${time}${tz}`);
+  return isNaN(at.getTime()) ? null : at.getTime();
+}
+
 // Read a header case-insensitively. HTTP header names are case-insensitive, so a
 // caller that already sent `x-conversation-id` must be found — testing the exact
 // key would miss it, add a second `X-Conversation-ID`, and undici would then join
@@ -194,42 +210,42 @@ export class CodeBuddyIntlExecutor extends DefaultExecutor {
         const data = JSON.parse(bodyText);
         const msg = data?.msg || data?.message || data?.error?.message || "";
         if (data?.code === 6004 || /超出频率限制|frequency limit|限额/i.test(msg)) {
-          let resetsAtMs = null;
-          const match = msg.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})(?:\s*UTC\+?([0-9:]+))?/i);
-          if (match) {
-            const dp = match[1];
-            const tp = match[2];
-            const tz = match[3]
-              ? (match[3].includes(":") ? (match[3].startsWith("+") ? match[3] : `+${match[3]}`) : `+${match[3].padStart(2, "0")}:00`)
-              : "+08:00";
-            const dt = new Date(`${dp}T${tp}${tz}`);
-            if (!isNaN(dt.getTime())) resetsAtMs = dt.getTime();
-          }
           return {
             status: 429,
             message: msg || "CodeBuddy frequency limit (6004)",
-            resetsAtMs,
+            resetsAtMs: parseResetAt(msg),
           };
         }
 
-        // 11140 "request illegal" is the gateway's risk-control block: the body
-        // carries displayMsg["en"] = "Your account has been restricted due to
-        // unusual activity". It is account-scoped, not request-scoped — an
-        // identical body succeeds on a healthy account — so surface it as 403
-        // with the upstream wording and requestId. Without this branch the raw
-        // JSON body becomes the error message, and once the account goes into
-        // the 403 cooldown the caller only sees a 503 "all accounts unavailable"
-        // wrapping that JSON, which reads like a gateway bug.
+        // 11140 is overloaded. Three independent sources (the qiyworkapi
+        // gateway, Buddy2api's Classify, and this client's own live 403) agree
+        // that the SAME code carries both:
+        //   - "request illegal" + account-restricted displayMsg → account-level
+        //     risk-control ban (re-login/appeal, does not self-heal); and
+        //   - "The model provider is rate-limiting requests." → ordinary
+        //     throttling that must stay a retryable 429.
+        // Classifying on the code alone turns normal throttling into a ban, so
+        // branch on the wording and default the ambiguous remainder to 429.
         if (data?.code === 11140) {
-          const display = data?.displayMsg?.en || data?.displayMsg?.["zh-hans"] || data?.msg || "";
+          const display = data?.displayMsg?.en || data?.displayMsg?.["zh-hans"] || "";
+          const text = `${msg} ${display}`;
+          if (/request illegal|account (?:has been )?restricted|unusual activity|账号存在异常行为|帳號存在異常行為/i.test(text)) {
+            // Canonical phrase "account restricted upstream" is matched by
+            // errorConfig's ban rule (2h, account-wide lock).
+            return {
+              status: 403,
+              message:
+                'CodeBuddy Intl account restricted upstream (11140 "request illegal")'
+                + (display || msg ? `: ${display || msg}` : "")
+                + ". This is a risk-control block on the account, not the request: re-sign in or "
+                + "appeal in the official WorkBuddy app. It does not clear on a short cooldown."
+                + (data?.requestId ? ` requestId=${data.requestId}` : ""),
+            };
+          }
           return {
-            status: 403,
-            message:
-              'CodeBuddy Intl account restricted upstream (11140 "request illegal")'
-              + (display ? `: ${display}` : "")
-              + ". This is a risk-control block on the account, not the request: switch account/provider "
-              + "or wait for the block to lift."
-              + (data?.requestId ? ` requestId=${data.requestId}` : ""),
+            status: 429,
+            message: msg || display || "CodeBuddy rate limit (11140)",
+            resetsAtMs: parseResetAt(msg),
           };
         }
 
