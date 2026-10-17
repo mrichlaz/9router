@@ -1,3 +1,23 @@
+# v0.5.100 (2026-10-17)
+
+## Fixes (fork: CodeBuddy Intl channel verification — upstream PRs #4949 + #4944)
+- **CodeBuddy Intl (WorkBuddy AI)**: chat gateway and billing endpoint moved to `www.workbuddy.ai` (same back end as `codebuddy.ai`); outbound identity aligned to the official 5.8.4 desktop client (UA `WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`, `X-IDE-Type/-Name/-Version`, plus `X-Private-Data`/`X-Agent-*`/`X-Domain`)
+- **CodeBuddy Intl**: every request now carries the `X-Conversation-*` family the gateway's channel verification demands (HTTP 400 code 11128 `conversation id missing` without it) — dashed-UUIDv7 `X-Conversation-ID` derived stably from the session key or opening user message, plus the request/message/trace id family
+- **CodeBuddy Intl**: caller-supplied ids preserved through case-insensitive lookup, second pass idempotent, `buildHeaders` fails closed naming the gate, `parseError` reports 11128 as channel verification
+- **Tests/baseline**: `tests/unit/codebuddy-intl-channel-verification.test.js`; `tests/__baseline__/providers-baseline.json` re-synced for the identity change
+
+## Fixes (fork: OpenCode free-tier restoration — upstream PRs #4840 + #4842)
+- **OpenCode**: free-tier inference moved from deprecated `/zen/v1/*` to `/inference/v1/*`; UA `opencode/latest/2.0.29/cli`; canonical `read` + `shell` tool fingerprint with `bash`→`shell` aliasing
+- **OpenCode**: v2 client fingerprint; valid session-id counters; verbatim `read`/`shell` definitions with `*_client` aliasing; rejected `x-opencode-request` dropped; `tool_choice: "none"` never forced
+- **OpenCode**: dual session headers (`x-opencode-session` + `x-opencode-session-id`); 128-tool cap with `^[a-zA-Z0-9_-]+$` name sanitization
+- Live-verified: `oc/muse-spark-1.3-contributor-free` (Responses) and `oc/mimo-v2.6-flash-free` (chat) return HTTP 200
+
+## Chores (fork)
+- **Upstream sync**: add `docs/UPSTREAM-SYNC.md` + `scripts/sync-upstream.sh` helper
+- **README**: drop ACS-specific install instructions
+- **release**: `scripts/release.js` no longer crashes after a successful push
+- **Housekeeping**: remove stray `CLAUDE.md.bak.*` and `open-sse/handlers/chatCore.js.orig` committed by an upstream merge; ignore them going forward
+
 # v0.5.99-andyvandaric-patch (2026-10-15, fork)
 
 ## Fixes (fork: CodeBuddy Intl channel verification — upstream PRs #4949 + #4944)
